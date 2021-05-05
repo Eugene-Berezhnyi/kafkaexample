@@ -1,5 +1,8 @@
 package com.berezhnyi.kafkaexample;
 
+import com.berezhnyi.kafkaexample.aggregator.InvoiceAggregator;
+import com.berezhnyi.kafkaexample.aggregator.OrderCreatedAggregator;
+import com.berezhnyi.kafkaexample.aggregator.ShippedAggregator;
 import com.berezhnyi.kafkaexample.model.InvoiceEvent;
 import com.berezhnyi.kafkaexample.model.OrderCreatedEvent;
 import com.berezhnyi.kafkaexample.model.ResultingEvent;
@@ -16,11 +19,13 @@ import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.kstream.*;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.Properties;
 
-public class Producers implements CommandLineRunner {
+@Component
+public class Producers2 implements CommandLineRunner {
 
     final private String appId;
     final private int createdPartition;
@@ -35,7 +40,7 @@ public class Producers implements CommandLineRunner {
     final Producer<String,ShippedEvent> shippedEventProducer;
     final Producer<String,InvoiceEvent> invoiceEventProducer;
 
-    public Producers() {
+    public Producers2() {
         this.appId = "OuterJoin" + (int)(Math.random()*1000);
         this.createdPartition = 0;
         this.shippedPartition = 0;
@@ -84,42 +89,26 @@ public class Producers implements CommandLineRunner {
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, appId);
         props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
 
+//        Business Logic Start
+
         StreamsBuilder builder = new StreamsBuilder();
         KStream<String, OrderCreatedEvent> firstSource = builder.stream(createdTopic, Consumed.with(Serdes.String(), DagSerde.CREATE_SERDE));
         KStream<String, ShippedEvent> secondSource = builder.stream(shippedTopic, Consumed.with(Serdes.String(), DagSerde.SHIPPED_SERDE));
         KStream<String, InvoiceEvent> thirdSource = builder.stream(invoiceTopic, Consumed.with(Serdes.String(), DagSerde.INVOICE_SERDE));
-        KStream<String, ResultingEvent> innerJoin = firstSource
-                .join (secondSource,
-                (OrderCreatedEvent orderCreatedEvent, ShippedEvent shippedEvent) ->  new ResultingEvent(
-                        orderCreatedEvent !=null ? orderCreatedEvent.getCorrelationId() : null,
-                        orderCreatedEvent !=null ? orderCreatedEvent.someField1 : null,
-                        shippedEvent !=null ? shippedEvent.someField2 : null,
-                        null,
-                        Math.min(orderCreatedEvent.getTimestamp(), shippedEvent.getTimestamp())
-                ),
-                JoinWindows.of(Duration.ofMillis(60000)),
-                StreamJoined.with(Serdes.String(), /* key */
-                        DagSerde.CREATE_SERDE, /* left value */
-                        DagSerde.SHIPPED_SERDE));
 
-        innerJoin.foreach((k,v)-> System.out.println("MIDDLE " + k +"|->|"+ v));
+        final KGroupedStream<String, OrderCreatedEvent> orderCreatedGrouped = firstSource.groupByKey();
+        final KGroupedStream<String, ShippedEvent> shippedGrouped = secondSource.groupByKey();
+        final KGroupedStream<String, InvoiceEvent> invoiceGrouped = thirdSource.groupByKey();
 
-        innerJoin = innerJoin.join(thirdSource,
-                        (ResultingEvent resultingEvent, InvoiceEvent invoiceEvent) ->  new ResultingEvent(
-                                resultingEvent !=null ? resultingEvent.getCorrelationId() : null,
-                                resultingEvent !=null ? resultingEvent.someField1 : null,
-                                resultingEvent !=null ? resultingEvent.someField2 : null,
-                                invoiceEvent != null ? invoiceEvent.someField3 : null,
-                                Math.max(resultingEvent.getTimestamp(), invoiceEvent.getTimestamp())
-                        ),
-                        JoinWindows.of(Duration.ofMillis(60000)),
-                        StreamJoined.with(Serdes.String(), /* key */
-                                DagSerde.RESULTING_SERDE, /* left value */
-                                DagSerde.INVOICE_SERDE)); /* right value */
+        KTable<Windowed<String>, ResultingEvent> aggregated = orderCreatedGrouped.cogroup(new OrderCreatedAggregator())
+                .cogroup(shippedGrouped, new ShippedAggregator())
+                .cogroup(invoiceGrouped, new InvoiceAggregator())
+                .windowedBy(TimeWindows.of(Duration.ofSeconds(60)))
+                .aggregate(ResultingEvent::new, Materialized.with(Serdes.String(), DagSerde.RESULTING_SERDE));
 
+        aggregated.toStream().foreach((k,v)-> System.out.println("MIDDLE " + k +"|->|"+ v));
 
-        innerJoin.foreach((k,v)-> System.out.println(outputTopic + " " + k +"|->|"+ v));
-        innerJoin.to(outputTopic, Produced.with(Serdes.String(), DagSerde.RESULTING_SERDE));
+//        Business Logic End
 
         final Topology topology = builder.build();
         System.out.println(topology);
