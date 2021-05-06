@@ -12,5 +12,4 @@ public class ResultingEvent {
     public String someField1;
     public String someField2;
     public String someField3;
-    private long timestamp;
 }
